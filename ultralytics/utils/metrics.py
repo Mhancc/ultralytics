@@ -1289,14 +1289,12 @@ class OBBMetrics(SimpleClass):
         return []
     
 class BJModel2OBBMetric(Metric):
-    @property
     def fitness(self):
         """Model fitness as a weighted combination of metrics."""
         w = [0.3, 0.5, 0.2, 0]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
         return (np.array(self.mean_results()) * w).sum()
     
 class BJModel2KptMetric(Metric):
-    @property
     def fitness(self):
         """Model fitness as a weighted combination of metrics."""
         w = [0.1, 0.7, 0, 0.2]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
