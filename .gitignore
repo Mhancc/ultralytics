@@ -169,3 +169,5 @@ pnnx*
 calibration_*.npy
 
 *.bak
+
+main.py
