@@ -726,7 +726,7 @@ class v8OBBWithKptLoss(v8DetectionLoss):
         class_weights = None
         if self.nc == 9:
             class_weights = torch.tensor([0.28721,1.3276,1.8116,18.072,17.802,2.1669,14.382,5.0118,0.29666],dtype=torch.float,device=self.device)
-            class_weights = class_weights[None,:,None]
+            class_weights = class_weights[None,None,:]
         self.bce = nn.BCEWithLogitsLoss(reduction="none",weight=class_weights)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = RotatedBboxLoss(self.reg_max - 1, use_dfl=self.use_dfl).to(self.device)
