@@ -715,8 +715,7 @@ class v8OBBLoss(v8DetectionLoss):
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
         return torch.cat((dist2rbox(pred_dist, pred_angle, anchor_points), pred_angle), dim=-1)
     
-
-class v8OBBWithHtpLoss(v8DetectionLoss):
+class v8OBBWithKptLoss(v8DetectionLoss):
     def __init__(self, model):
         """
         Initializes v8OBBLoss with model, assigner, and rotated bbox loss.
@@ -726,7 +725,16 @@ class v8OBBWithHtpLoss(v8DetectionLoss):
         super().__init__(model)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = RotatedBboxLoss(self.reg_max - 1, use_dfl=self.use_dfl).to(self.device)
+        #self.calculate_keypoints_loss = v8PoseLoss.calculate_keypoints_loss
+        self.kpts_decode = v8PoseLoss.kpts_decode
+        self.kpt_shape = model.model[-1].kpt_shape
+        self.bce_pose = nn.BCEWithLogitsLoss()
+        is_pose = self.kpt_shape == [17, 3]
+        nkpt = self.kpt_shape[0]  # number of keypoints
+        sigmas = torch.from_numpy(OKS_SIGMA).to(self.device) if is_pose else torch.ones(nkpt, device=self.device) / nkpt
 
+        self.keypoint_loss = KeypointLoss(sigmas=sigmas)
+    
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         if targets.shape[0] == 0:
@@ -744,6 +752,187 @@ class v8OBBWithHtpLoss(v8DetectionLoss):
                     bboxes[..., :4].mul_(scale_tensor)
                     out[j, :n] = torch.cat([targets[matches, 1:2], bboxes], dim=-1)
         return out
+    
+    def __call__(self, preds, batch):
+        """Calculate and return the loss for the YOLO model."""
+        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, mask
+        feats, pred_angle, pred_kpts = preds if isinstance(preds[0], list) else preds[1]
+        batch_size = pred_angle.shape[0]  # batch size, number of masks, mask height, mask width
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
+
+        # b, grids, ..
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()#bs,8400,nc
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()#bs,8400,64
+        pred_angle = pred_angle.permute(0, 2, 1).contiguous()#bs,8400,1
+        pred_kpts = pred_kpts.permute(0, 2, 1).contiguous()#bs,8400,1*3(17*3)
+
+        dtype = pred_scores.dtype
+        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+
+        # targets
+        try:
+            batch_idx = batch["batch_idx"].view(-1, 1)
+            targets = torch.cat((batch_idx, batch["cls"].view(-1, 1), batch["bboxes"].view(-1, 5)), 1)
+            rw, rh = targets[:, 4] * imgsz[0].item(), targets[:, 5] * imgsz[1].item()
+            targets = targets[(rw >= 2) & (rh >= 2)]  # filter rboxes of tiny size to stabilize training
+            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            gt_labels, gt_bboxes = targets.split((1, 5), 2)  # cls, xywhr
+            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
+        except RuntimeError as e:
+            raise TypeError(
+                "ERROR ❌ OBB dataset incorrectly formatted or not a OBB dataset.\n"
+                "This error can occur when incorrectly training a 'OBB' model on a 'detect' dataset, "
+                "i.e. 'yolo train model=yolov8n-obb.pt data=dota8.yaml'.\nVerify your dataset is a "
+                "correctly formatted 'OBB' dataset using 'data=dota8.yaml' "
+                "as an example.\nSee https://docs.ultralytics.com/datasets/obb/ for help."
+            ) from e
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri, pred_angle)  # xyxy, (b, h*w, 4)
+        pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))  # (b, h*w, 17, 3)
+
+        bboxes_for_assigner = pred_bboxes.clone().detach()
+        # Only the first four elements need to be scaled
+        bboxes_for_assigner[..., :4] *= stride_tensor
+        _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
+            pred_scores.detach().sigmoid(),
+            bboxes_for_assigner.type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+
+        target_scores_sum = max(target_scores.sum(), 1)
+
+        # Cls loss
+        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+
+        # Bbox loss
+        if fg_mask.sum():
+            target_bboxes[..., :4] /= stride_tensor
+            loss[0], loss[4] = self.bbox_loss(
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+            )
+            keypoints = batch["keypoints"].to(self.device).float().clone()
+            keypoints[..., 0] *= imgsz[1]
+            keypoints[..., 1] *= imgsz[0]
+
+            #heatmap = self.heatmap_generator(keypoints,imgsz,-1)
+
+            loss[2],loss[3] = self.calculate_keypoints_loss(
+                fg_mask, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts
+            )
+
+        else:
+            loss[0] += (pred_angle * 0).sum()
+
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.pose  # pose gain
+        loss[3] *= self.hyp.kobj  # kobj gain
+        loss[4] *= self.hyp.dfl  # dfl gain
+
+        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+
+    def calculate_keypoints_loss(
+        self, masks, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts
+    ):
+        """
+        Calculate the keypoints loss for the model.
+
+        This function calculates the keypoints loss and keypoints object loss for a given batch. The keypoints loss is
+        based on the difference between the predicted keypoints and ground truth keypoints. The keypoints object loss is
+        a binary classification loss that classifies whether a keypoint is present or not.
+
+        Args:
+            masks (torch.Tensor): Binary mask tensor indicating object presence, shape (BS, N_anchors).
+            target_gt_idx (torch.Tensor): Index tensor mapping anchors to ground truth objects, shape (BS, N_anchors).
+            keypoints (torch.Tensor): Ground truth keypoints, shape (N_kpts_in_batch, N_kpts_per_object, kpts_dim).
+            batch_idx (torch.Tensor): Batch index tensor for keypoints, shape (N_kpts_in_batch, 1).
+            stride_tensor (torch.Tensor): Stride tensor for anchors, shape (N_anchors, 1).
+            target_bboxes (torch.Tensor): Ground truth boxes in (x1, y1, x2, y2) format, shape (BS, N_anchors, 4).
+            pred_kpts (torch.Tensor): Predicted keypoints, shape (BS, N_anchors, N_kpts_per_object, kpts_dim).
+
+        Returns:
+            (tuple): Returns a tuple containing:
+                - kpts_loss (torch.Tensor): The keypoints loss.
+                - kpts_obj_loss (torch.Tensor): The keypoints object loss.
+        """
+        batch_idx = batch_idx.flatten()
+        batch_size = len(masks)
+
+        # Find the maximum number of keypoints in a single image
+        max_kpts = torch.unique(batch_idx, return_counts=True)[1].max()
+
+        # Create a tensor to hold batched keypoints
+        batched_keypoints = torch.zeros(
+            (batch_size, max_kpts, keypoints.shape[1], keypoints.shape[2]), device=keypoints.device
+        )
+
+        # TODO: any idea how to vectorize this?
+        # Fill batched_keypoints with keypoints based on batch_idx
+        for i in range(batch_size):
+            keypoints_i = keypoints[batch_idx == i]
+            batched_keypoints[i, : keypoints_i.shape[0]] = keypoints_i #bs,kpt_max_count,17,3
+
+        # Expand dimensions of target_gt_idx to match the shape of batched_keypoints
+        target_gt_idx_expanded = target_gt_idx.unsqueeze(-1).unsqueeze(-1)#bs,8400,1,1
+
+        # Use target_gt_idx_expanded to select keypoints from batched_keypoints
+        selected_keypoints = batched_keypoints.gather(
+            1, target_gt_idx_expanded.expand(-1, -1, keypoints.shape[1], keypoints.shape[2])
+        )#bs,8400,17,3   target_kpt
+
+        # Divide coordinates by stride
+        selected_keypoints /= stride_tensor.view(1, -1, 1, 1)
+
+        kpts_loss = 0
+        kpts_obj_loss = 0
+
+        if masks.any():
+            gt_kpt = selected_keypoints[masks] #bs,n,17,3
+            area = target_bboxes[masks][:, 2:-1].prod(1, keepdim=True)
+            pred_kpt = pred_kpts[masks] #bs,n,17,3
+            kpt_mask = gt_kpt[..., 2] != 0 if gt_kpt.shape[-1] == 3 else torch.full_like(gt_kpt[..., 0], True)
+            kpts_loss = self.keypoint_loss(pred_kpt, gt_kpt, kpt_mask, area)  # pose loss
+
+            if pred_kpt.shape[-1] == 3:
+                kpts_obj_loss = self.bce_pose(pred_kpt[..., 2], kpt_mask.float())  # keypoint obj loss
+
+        return kpts_loss, kpts_obj_loss
+    
+    def bbox_decode(self, anchor_points, pred_dist, pred_angle):
+        """
+        Decode predicted object bounding box coordinates from anchor points and distribution.
+
+        Args:
+            anchor_points (torch.Tensor): Anchor points, (h*w, 2).
+            pred_dist (torch.Tensor): Predicted rotated distance, (bs, h*w, 4).
+            pred_angle (torch.Tensor): Predicted angle, (bs, h*w, 1).
+
+        Returns:
+            (torch.Tensor): Predicted rotated bounding boxes with angles, (bs, h*w, 5).
+        """
+        if self.use_dfl:
+            b, a, c = pred_dist.shape  # batch, anchors, channels
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+        return torch.cat((dist2rbox(pred_dist, pred_angle, anchor_points), pred_angle), dim=-1)
+
+class v8OBBWithHtpLoss(v8OBBWithKptLoss):
+    def __init__(self, model):
+        """
+        Initializes v8OBBLoss with model, assigner, and rotated bbox loss.
+
+        Note model must be de-paralleled.
+        """
+        super().__init__(model)
+        self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.bbox_loss = RotatedBboxLoss(self.reg_max - 1, use_dfl=self.use_dfl).to(self.device)
 
     def __call__(self, preds, batch):
         """Calculate and return the loss for the YOLO model."""
@@ -973,191 +1162,5 @@ class v8OBBWithHtpLoss(v8DetectionLoss):
 
         return loss / fg_mask.sum()
 
-    def bbox_decode(self, anchor_points, pred_dist, pred_angle):
-        """
-        Decode predicted object bounding box coordinates from anchor points and distribution.
 
-        Args:
-            anchor_points (torch.Tensor): Anchor points, (h*w, 2).
-            pred_dist (torch.Tensor): Predicted rotated distance, (bs, h*w, 4).
-            pred_angle (torch.Tensor): Predicted angle, (bs, h*w, 1).
 
-        Returns:
-            (torch.Tensor): Predicted rotated bounding boxes with angles, (bs, h*w, 5).
-        """
-        if self.use_dfl:
-            b, a, c = pred_dist.shape  # batch, anchors, channels
-            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
-        return torch.cat((dist2rbox(pred_dist, pred_angle, anchor_points), pred_angle), dim=-1)
-    
-
-class v8OBBWithKptLoss(v8OBBWithHtpLoss):
-    def __init__(self, model):
-        """
-        Initializes v8OBBLoss with model, assigner, and rotated bbox loss.
-
-        Note model must be de-paralleled.
-        """
-        super().__init__(model)
-        #self.calculate_keypoints_loss = v8PoseLoss.calculate_keypoints_loss
-        self.kpts_decode = v8PoseLoss.kpts_decode
-        self.kpt_shape = model.model[-1].kpt_shape
-        self.bce_pose = nn.BCEWithLogitsLoss()
-        is_pose = self.kpt_shape == [17, 3]
-        nkpt = self.kpt_shape[0]  # number of keypoints
-        sigmas = torch.from_numpy(OKS_SIGMA).to(self.device) if is_pose else torch.ones(nkpt, device=self.device) / nkpt
-
-        self.keypoint_loss = KeypointLoss(sigmas=sigmas)
-    
-    def __call__(self, preds, batch):
-        """Calculate and return the loss for the YOLO model."""
-        loss = torch.zeros(5, device=self.device)  # box, cls, dfl, mask
-        feats, pred_angle, pred_kpts = preds if isinstance(preds[0], list) else preds[1]
-        batch_size = pred_angle.shape[0]  # batch size, number of masks, mask height, mask width
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, self.nc), 1
-        )
-
-        # b, grids, ..
-        pred_scores = pred_scores.permute(0, 2, 1).contiguous()#bs,8400,nc
-        pred_distri = pred_distri.permute(0, 2, 1).contiguous()#bs,8400,64
-        pred_angle = pred_angle.permute(0, 2, 1).contiguous()#bs,8400,1
-        pred_kpts = pred_kpts.permute(0, 2, 1).contiguous()#bs,8400,1*3(17*3)
-
-        dtype = pred_scores.dtype
-        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
-        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
-
-        # targets
-        try:
-            batch_idx = batch["batch_idx"].view(-1, 1)
-            targets = torch.cat((batch_idx, batch["cls"].view(-1, 1), batch["bboxes"].view(-1, 5)), 1)
-            rw, rh = targets[:, 4] * imgsz[0].item(), targets[:, 5] * imgsz[1].item()
-            targets = targets[(rw >= 2) & (rh >= 2)]  # filter rboxes of tiny size to stabilize training
-            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-            gt_labels, gt_bboxes = targets.split((1, 5), 2)  # cls, xywhr
-            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
-        except RuntimeError as e:
-            raise TypeError(
-                "ERROR ❌ OBB dataset incorrectly formatted or not a OBB dataset.\n"
-                "This error can occur when incorrectly training a 'OBB' model on a 'detect' dataset, "
-                "i.e. 'yolo train model=yolov8n-obb.pt data=dota8.yaml'.\nVerify your dataset is a "
-                "correctly formatted 'OBB' dataset using 'data=dota8.yaml' "
-                "as an example.\nSee https://docs.ultralytics.com/datasets/obb/ for help."
-            ) from e
-
-        # Pboxes
-        pred_bboxes = self.bbox_decode(anchor_points, pred_distri, pred_angle)  # xyxy, (b, h*w, 4)
-        pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))  # (b, h*w, 17, 3)
-
-        bboxes_for_assigner = pred_bboxes.clone().detach()
-        # Only the first four elements need to be scaled
-        bboxes_for_assigner[..., :4] *= stride_tensor
-        _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
-            pred_scores.detach().sigmoid(),
-            bboxes_for_assigner.type(gt_bboxes.dtype),
-            anchor_points * stride_tensor,
-            gt_labels,
-            gt_bboxes,
-            mask_gt,
-        )
-
-        target_scores_sum = max(target_scores.sum(), 1)
-
-        # Cls loss
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
-
-        # Bbox loss
-        if fg_mask.sum():
-            target_bboxes[..., :4] /= stride_tensor
-            loss[0], loss[4] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
-            )
-            keypoints = batch["keypoints"].to(self.device).float().clone()
-            keypoints[..., 0] *= imgsz[1]
-            keypoints[..., 1] *= imgsz[0]
-
-            #heatmap = self.heatmap_generator(keypoints,imgsz,-1)
-
-            loss[2],loss[3] = self.calculate_keypoints_loss(
-                fg_mask, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts
-            )
-
-        else:
-            loss[0] += (pred_angle * 0).sum()
-
-        loss[0] *= self.hyp.box  # box gain
-        loss[1] *= self.hyp.cls  # cls gain
-        loss[2] *= self.hyp.pose  # pose gain
-        loss[3] *= self.hyp.kobj  # kobj gain
-        loss[4] *= self.hyp.dfl  # dfl gain
-
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
-
-    def calculate_keypoints_loss(
-        self, masks, target_gt_idx, keypoints, batch_idx, stride_tensor, target_bboxes, pred_kpts
-    ):
-        """
-        Calculate the keypoints loss for the model.
-
-        This function calculates the keypoints loss and keypoints object loss for a given batch. The keypoints loss is
-        based on the difference between the predicted keypoints and ground truth keypoints. The keypoints object loss is
-        a binary classification loss that classifies whether a keypoint is present or not.
-
-        Args:
-            masks (torch.Tensor): Binary mask tensor indicating object presence, shape (BS, N_anchors).
-            target_gt_idx (torch.Tensor): Index tensor mapping anchors to ground truth objects, shape (BS, N_anchors).
-            keypoints (torch.Tensor): Ground truth keypoints, shape (N_kpts_in_batch, N_kpts_per_object, kpts_dim).
-            batch_idx (torch.Tensor): Batch index tensor for keypoints, shape (N_kpts_in_batch, 1).
-            stride_tensor (torch.Tensor): Stride tensor for anchors, shape (N_anchors, 1).
-            target_bboxes (torch.Tensor): Ground truth boxes in (x1, y1, x2, y2) format, shape (BS, N_anchors, 4).
-            pred_kpts (torch.Tensor): Predicted keypoints, shape (BS, N_anchors, N_kpts_per_object, kpts_dim).
-
-        Returns:
-            (tuple): Returns a tuple containing:
-                - kpts_loss (torch.Tensor): The keypoints loss.
-                - kpts_obj_loss (torch.Tensor): The keypoints object loss.
-        """
-        batch_idx = batch_idx.flatten()
-        batch_size = len(masks)
-
-        # Find the maximum number of keypoints in a single image
-        max_kpts = torch.unique(batch_idx, return_counts=True)[1].max()
-
-        # Create a tensor to hold batched keypoints
-        batched_keypoints = torch.zeros(
-            (batch_size, max_kpts, keypoints.shape[1], keypoints.shape[2]), device=keypoints.device
-        )
-
-        # TODO: any idea how to vectorize this?
-        # Fill batched_keypoints with keypoints based on batch_idx
-        for i in range(batch_size):
-            keypoints_i = keypoints[batch_idx == i]
-            batched_keypoints[i, : keypoints_i.shape[0]] = keypoints_i #bs,kpt_max_count,17,3
-
-        # Expand dimensions of target_gt_idx to match the shape of batched_keypoints
-        target_gt_idx_expanded = target_gt_idx.unsqueeze(-1).unsqueeze(-1)#bs,8400,1,1
-
-        # Use target_gt_idx_expanded to select keypoints from batched_keypoints
-        selected_keypoints = batched_keypoints.gather(
-            1, target_gt_idx_expanded.expand(-1, -1, keypoints.shape[1], keypoints.shape[2])
-        )#bs,8400,17,3   target_kpt
-
-        # Divide coordinates by stride
-        selected_keypoints /= stride_tensor.view(1, -1, 1, 1)
-
-        kpts_loss = 0
-        kpts_obj_loss = 0
-
-        if masks.any():
-            gt_kpt = selected_keypoints[masks] #bs,n,17,3
-            area = target_bboxes[masks][:, 2:-1].prod(1, keepdim=True)
-            pred_kpt = pred_kpts[masks] #bs,n,17,3
-            kpt_mask = gt_kpt[..., 2] != 0 if gt_kpt.shape[-1] == 3 else torch.full_like(gt_kpt[..., 0], True)
-            kpts_loss = self.keypoint_loss(pred_kpt, gt_kpt, kpt_mask, area)  # pose loss
-
-            if pred_kpt.shape[-1] == 3:
-                kpts_obj_loss = self.bce_pose(pred_kpt[..., 2], kpt_mask.float())  # keypoint obj loss
-
-        return kpts_loss, kpts_obj_loss
