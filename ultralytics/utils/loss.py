@@ -723,11 +723,12 @@ class v8OBBWithKptLoss(v8DetectionLoss):
         Note model must be de-paralleled.
         """
         super().__init__(model)
-        class_weights = None
+        pos_weights = None
         if self.nc == 9:
-            class_weights = torch.tensor([0.28721,1.3276,1.8116,18.072,17.802,2.1669,14.382,5.0118,0.29666],dtype=torch.float,device=self.device)
-            class_weights = class_weights[None,None,:]
-        self.bce = nn.BCEWithLogitsLoss(reduction="none",weight=class_weights)
+            #pos_weights = torch.tensor([0.28721,1.3276,1.8116,18.072,17.802,2.1669,14.382,5.0118,0.29666],dtype=torch.float,device=self.device)
+            pos_weights = torch.tensor([1,4.5,1,10,10,0.5,10,6,1],dtype=torch.float,device=self.device)
+            pos_weights = pos_weights[None,None,:]
+        self.bce = nn.BCEWithLogitsLoss(reduction="none",pos_weight=pos_weights)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = RotatedBboxLoss(self.reg_max - 1, use_dfl=self.use_dfl).to(self.device)
         #self.calculate_keypoints_loss = v8PoseLoss.calculate_keypoints_loss
