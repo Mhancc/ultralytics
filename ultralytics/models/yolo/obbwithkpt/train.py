@@ -65,12 +65,6 @@ class OBBWithKptTrainer(yolo.detect.DetectionTrainer):
             if any(x in k for x in freeze_header_names):
                 LOGGER.info(f"Freezing layer '{k}'")
                 v.requires_grad = False
-            elif not v.requires_grad and v.dtype.is_floating_point:  # only floating point Tensor can require gradients
-                LOGGER.info(
-                    f"WARNING ⚠️ setting 'requires_grad=True' for frozen layer '{k}'. "
-                    "See ultralytics.engine.trainer for customization of frozen layers."
-                )
-                v.requires_grad = True
 
 
 class OBBWithHtpTrainer(OBBWithKptTrainer):
