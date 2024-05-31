@@ -4,7 +4,7 @@ from copy import copy
 
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import OBBWithHtpModel, OBBWithKptModel
-from ultralytics.utils import DEFAULT_CFG, RANK
+from ultralytics.utils import DEFAULT_CFG, RANK, LOGGER
 from ultralytics.utils.plotting import plot_images, plot_results
 
 class OBBWithKptTrainer(yolo.detect.DetectionTrainer):
@@ -55,6 +55,22 @@ class OBBWithKptTrainer(yolo.detect.DetectionTrainer):
     def plot_metrics(self):
         """Plots training/val metrics."""
         plot_results(file=self.csv, pose=True, on_plot=self.on_plot)  # save results.png
+    
+    def _setup_train(self, world_size):
+        super()._setup_train(world_size)
+        # Freeze specified layers
+        freeze_header_names = ["model.42.cv3","model.42.cv5"]
+        for k, v in self.model.named_parameters():
+            # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
+            if any(x in k for x in freeze_header_names):
+                LOGGER.info(f"Freezing layer '{k}'")
+                v.requires_grad = False
+            elif not v.requires_grad and v.dtype.is_floating_point:  # only floating point Tensor can require gradients
+                LOGGER.info(
+                    f"WARNING ⚠️ setting 'requires_grad=True' for frozen layer '{k}'. "
+                    "See ultralytics.engine.trainer for customization of frozen layers."
+                )
+                v.requires_grad = True
 
 
 class OBBWithHtpTrainer(OBBWithKptTrainer):
