@@ -72,6 +72,7 @@ class OBBWithKptValidator(DetectionValidator):
             cls, bbox = pbatch.pop("cls"), pbatch.pop("bbox")
             nl = len(cls)
             stat["target_cls"] = cls
+            stat["target_img"] = cls.unique()
             if npr == 0:
                 if nl:
                     for k in self.stats.keys():
@@ -247,7 +248,7 @@ class OBBWithKptValidator(DetectionValidator):
         val = self.data.get(self.args.split, "")  # validation path
         self.is_dota = isinstance(val, str) and "DOTA" in val  # is COCO
 
-        self.stats = dict(tp_p=[], tp=[], conf=[], pred_cls=[], target_cls=[])
+        self.stats = dict(tp_p=[], tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
     
     def get_desc(self):
         """Returns description of evaluation metrics in string format."""
