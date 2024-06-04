@@ -1288,18 +1288,6 @@ class OBBMetrics(SimpleClass):
         """Returns a list of curves for accessing specific metrics curves."""
         return []
     
-class BJModel2OBBMetric(Metric):
-    def fitness(self):
-        """Model fitness as a weighted combination of metrics."""
-        w = [0.3, 0.5, 0.2, 0]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
-        return (np.array(self.mean_results()) * w).sum()
-    
-class BJModel2KptMetric(Metric):
-    def fitness(self):
-        """Model fitness as a weighted combination of metrics."""
-        w = [0.1, 0.7, 0, 0.2]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
-        return (np.array(self.mean_results()) * w).sum()
-
 
 class OBBWithKptMetrics(SimpleClass):
     def __init__(self, save_dir=Path("."), plot=False, on_plot=None, names=()) -> None:
@@ -1307,8 +1295,8 @@ class OBBWithKptMetrics(SimpleClass):
         self.plot = plot
         self.on_plot = on_plot
         self.names = names
-        self.box = BJModel2OBBMetric()
-        self.pose = BJModel2KptMetric()
+        self.box = Metric()
+        self.pose = Metric()
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
 
     def process(self, tp, tp_p, conf, pred_cls, target_cls):
