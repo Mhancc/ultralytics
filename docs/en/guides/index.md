@@ -1,7 +1,7 @@
 ---
 comments: true
-description: In-depth exploration of Ultralytics' YOLO. Learn about the YOLO object detection model, how to train it on custom data, multi-GPU training, exporting, predicting, deploying, and more.
-keywords: Ultralytics, YOLO, Deep Learning, Object detection, PyTorch, Tutorial, Multi-GPU training, Custom data training, SAHI, Tiled Inference
+description: Master YOLO with Ultralytics tutorials covering training, deployment and optimization. Find solutions, improve metrics, and deploy with ease!.
+keywords: Ultralytics, YOLO, tutorials, guides, object detection, deep learning, PyTorch, training, deployment, optimization, computer vision
 ---
 
 # Comprehensive Tutorials to Ultralytics YOLO
@@ -44,6 +44,8 @@ Here's a compilation of in-depth guides to help you master different aspects of 
 - [OpenVINO Latency vs Throughput Modes](optimizing-openvino-latency-vs-throughput-modes.md) - Learn latency and throughput optimization techniques for peak YOLO inference performance.
 - [Steps of a Computer Vision Project ](steps-of-a-cv-project.md) 🚀 NEW: Learn about the key steps involved in a computer vision project, including defining goals, selecting models, preparing data, and evaluating results.
 - [Defining A Computer Vision Project's Goals](defining-project-goals.md) 🚀 NEW: Walk through how to effectively define clear and measurable goals for your computer vision project. Learn the importance of a well-defined problem statement and how it creates a roadmap for your project.
+- - [Data Collection and Annotation](data-collection-and-annotation.md)🚀 NEW: Explore the tools, techniques, and best practices for collecting and annotating data to create high-quality inputs for your computer vision models.
+- [Preprocessing Annotated Data](preprocessing_annotated_data.md)🚀 NEW: Learn about preprocessing and augmenting image data in computer vision projects using YOLOv8, including normalization, dataset augmentation, splitting, and exploratory data analysis (EDA).
 
 ## Contribute to Our Guides
 
