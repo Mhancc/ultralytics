@@ -81,6 +81,7 @@ def benchmark(
     device = select_device(device, verbose=False)
     if isinstance(model, (str, Path)):
         model = YOLO(model)
+    is_end2end = getattr(model.model.model[-1], "end2end", False)
 
     y = []
     t0 = time.time()
@@ -96,14 +97,18 @@ def benchmark(
                 assert MACOS or LINUX, "CoreML and TF.js export only supported on macOS and Linux"
                 assert not IS_RASPBERRYPI, "CoreML and TF.js export not supported on Raspberry Pi"
                 assert not IS_JETSON, "CoreML and TF.js export not supported on NVIDIA Jetson"
+                assert not is_end2end, "End-to-end models not supported by CoreML and TF.js yet"
             if i in {3, 5}:  # CoreML and OpenVINO
                 assert not IS_PYTHON_3_12, "CoreML and OpenVINO not supported on Python 3.12"
             if i in {6, 7, 8, 9, 10}:  # All TF formats
                 assert not isinstance(model, YOLOWorld), "YOLOWorldv2 TensorFlow exports not supported by onnx2tf yet"
+                assert not is_end2end, "End-to-end models not supported by onnx2tf yet"
             if i in {11}:  # Paddle
                 assert not isinstance(model, YOLOWorld), "YOLOWorldv2 Paddle exports not supported yet"
+                assert not is_end2end, "End-to-end models not supported by PaddlePaddle yet"
             if i in {12}:  # NCNN
                 assert not isinstance(model, YOLOWorld), "YOLOWorldv2 NCNN exports not supported yet"
+                assert not is_end2end, "End-to-end models not supported by NCNN yet"
             if "cpu" in device.type:
                 assert cpu, "inference not supported on CPU"
             if "cuda" in device.type:
@@ -208,9 +213,10 @@ class RF100Benchmark:
 
         return self.ds_names, self.ds_cfg_list
 
-    def fix_yaml(self, path):
+    @staticmethod
+    def fix_yaml(path):
         """
-        Function to fix yaml train and val path.
+        Function to fix YAML train and val path.
 
         Args:
             path (str): YAML file path.
@@ -245,32 +251,19 @@ class RF100Benchmark:
                 entries = line.split(" ")
                 entries = list(filter(lambda val: val != "", entries))
                 entries = [e.strip("\n") for e in entries]
-                start_class = False
-                for e in entries:
-                    if e == "all":
-                        if "(AP)" not in entries:
-                            if "(AR)" not in entries:
-                                # parse all
-                                eval = {}
-                                eval["class"] = entries[0]
-                                eval["images"] = entries[1]
-                                eval["targets"] = entries[2]
-                                eval["precision"] = entries[3]
-                                eval["recall"] = entries[4]
-                                eval["map50"] = entries[5]
-                                eval["map95"] = entries[6]
-                                eval_lines.append(eval)
-
-                    if e in class_names:
-                        eval = {}
-                        eval["class"] = entries[0]
-                        eval["images"] = entries[1]
-                        eval["targets"] = entries[2]
-                        eval["precision"] = entries[3]
-                        eval["recall"] = entries[4]
-                        eval["map50"] = entries[5]
-                        eval["map95"] = entries[6]
-                        eval_lines.append(eval)
+                eval_lines.extend(
+                    {
+                        "class": entries[0],
+                        "images": entries[1],
+                        "targets": entries[2],
+                        "precision": entries[3],
+                        "recall": entries[4],
+                        "map50": entries[5],
+                        "map95": entries[6],
+                    }
+                    for e in entries
+                    if e in class_names or (e == "all" and "(AP)" not in entries and "(AR)" not in entries)
+                )
         map_val = 0.0
         if len(eval_lines) > 1:
             print("There's more dicts")
