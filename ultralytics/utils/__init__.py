@@ -270,10 +270,17 @@ def set_logging(name="LOGGING_NAME", verbose=True):
     stream_handler.setFormatter(formatter)
     stream_handler.setLevel(level)
 
+    # Create and configure the RotatingFileHandler with the appropriate formatter and level
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(ROOT/'logfile.log', maxBytes=10**7, backupCount=2)
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(level)
+
     # Set up the logger
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
     logger.propagate = False
     return logger
 
