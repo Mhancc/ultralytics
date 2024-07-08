@@ -1,7 +1,8 @@
 def on_pretrain_routine_start(trainer):
-    trainer.force_stop_flag = False#添加一个强行停止的标志
-    trainer.state = {}#添加一个状态字典
-    trainer.state.update({"state":"Builds dataloaders and optimizer on correct rank process"})
+    pass
+    #trainer.force_stop_flag = False#添加一个强行停止的标志
+    #trainer.state = {}#添加一个状态字典
+    #trainer.state.update({"state":"Builds dataloaders and optimizer on correct rank process"})
 
 def on_pretrain_routine_end(trainer):
     if hasattr(trainer,'state'):
@@ -45,8 +46,8 @@ def on_fit_epoch_end(trainer):
     """Logs epoch metrics at end of training epoch."""
     if hasattr(trainer,'state'):
         trainer.state.update({"state":"fit epoch end"})
-    if hasattr(trainer,'force_stop_flag') and trainer.force_stop_flag:
-        trainer.stop = trainer.force_stop_flag
+    '''if hasattr(trainer,'force_stop_flag') and trainer.force_stop_flag:
+        trainer.stop = trainer.force_stop_flag'''
 
 def on_model_save(trainer):
     """Logs epoch metrics at end of training epoch."""
