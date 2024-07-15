@@ -35,7 +35,8 @@ def on_before_zero_grad(trainer):
 
 def on_train_batch_end(trainer):
     """Logs epoch metrics at end of training epoch."""
-    trainer.state.update({"state":"train batch end"})
+    if hasattr(trainer,'state'):
+        trainer.state.update({"state":"train batch end"})
 
 def on_train_epoch_end(trainer):
     """Logs epoch metrics at end of training epoch."""

@@ -739,7 +739,7 @@ class v8OBBWithKptLoss(v8DetectionLoss):
             pos_weights = pos_weights[None,None,:]
         self.bce = nn.BCEWithLogitsLoss(reduction="none",pos_weight=pos_weights)'''
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = RotatedBboxLoss(self.reg_max - 1, use_dfl=self.use_dfl).to(self.device)
+        self.bbox_loss = RotatedBboxLoss(self.reg_max).to(self.device)
         #self.calculate_keypoints_loss = v8PoseLoss.calculate_keypoints_loss
         self.kpts_decode = v8PoseLoss.kpts_decode
         self.kpt_shape = model.model[-1].kpt_shape
