@@ -418,7 +418,13 @@ class BaseTrainer:
                         self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")
-
+                # Early Stopping
+                if RANK != -1:  # if DDP training
+                    broadcast_list = [self.stop if RANK == 0 else None]
+                    dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
+                    self.stop = broadcast_list[0]
+                if self.stop:
+                    break  # must break all DDP ranks
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
             if RANK in {-1, 0}:
